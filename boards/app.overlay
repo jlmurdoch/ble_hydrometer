@@ -1,14 +1,30 @@
+&pmic {
+	regulators {
+		// IMU / Microphone power off
+		LDO1 {
+			/delete-property/ regulator-boot-on;
+		};
+	};
+};
+
+// Power Management IC - I2C
 &pmic_i2c {
 	sda-gpios = <&gpio1 18 GPIO_ACTIVE_HIGH>;
 	scl-gpios = <&gpio1 17 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
+// IMU
 &lsm6ds3tr_c {
 	zephyr,deferred-init;
 };
 
+// General Purpose Retention Register
+&gpregret1 {
+	status = "okay";
+};
 
+// LED
 &pwm20 {
 	status = "okay";
 };
@@ -16,6 +32,7 @@
 / {
 	pwmleds {
 		compatible = "pwm-leds";
+		// status = "disabled";
 
 		pwm_led0: pwm_led_0 {
 			pwms = <&pwm20 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
@@ -40,8 +57,4 @@
 		pwm-led1 = &pwm_led1;
 		pwm-led2 = &pwm_led2;
 	};
-};
-
-&gpregret1 {
-	status = "okay";
 };

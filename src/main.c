@@ -34,12 +34,11 @@
 
 LOG_MODULE_REGISTER(ble_hydrometer, LOG_LEVEL_INF);
 
-const struct device *const imu_vdd_dev = DEVICE_DT_GET(DT_NODELABEL(imu_vdd));
-const struct device *const imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
-const struct device *const gpregret1_dev = DEVICE_DT_GET(DT_NODELABEL(gpregret1));
-const struct device *const pmic = DEVICE_DT_GET(DT_NODELABEL(pmic));
-const struct device *const charger = DEVICE_DT_GET(DT_NODELABEL(pmic_charger));
-
+static const struct device *const imu_vdd_dev = DEVICE_DT_GET(DT_NODELABEL(imu_vdd));
+static const struct device *const imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
+static const struct device *const gpregret1_dev = DEVICE_DT_GET(DT_NODELABEL(gpregret1));
+static const struct device *const pmic = DEVICE_DT_GET(DT_NODELABEL(pmic));
+static const struct device *const charger = DEVICE_DT_GET(DT_NODELABEL(pmic_charger));
 static const struct pwm_dt_spec led_r = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led1));
 static const struct pwm_dt_spec led_g = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 static const struct pwm_dt_spec led_b = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led0));
@@ -212,7 +211,7 @@ static int read_imu_rotation(uint16_t *rotation) {
 	}
 
         // Wait for a result
-        k_sleep(K_MSEC(80)); // Sample Freq
+        k_msleep(80); // Sample Freq
 
         sensor_sample_fetch_chan(imu_dev, SENSOR_CHAN_ACCEL_XYZ);
         // across board, power LED down / user LED up == +g
@@ -331,7 +330,7 @@ int bthome_ble_adv(uint8_t pkt_id, uint8_t battery, uint16_t volts, uint8_t powe
                 return -1;
 	}
         
-        k_sleep(K_MSEC(300)); // 5-10 packets
+        k_msleep(300); // 5-10 packets
         bt_disable();
 
         return 0;
@@ -346,6 +345,13 @@ int main(void) {
         float c_volts, c_amps, c_temp, c_soc, c_delta;
         c_volts = c_amps = c_soc = 0;
 
+        if (!device_is_ready(led_r.dev) || !device_is_ready(led_g.dev) || !device_is_ready(led_b.dev)) {
+		return -1;
+        }
+
+        // Turn off the LED, as it will have flashed minimally
+        led_off();
+
         // Enable LDO1 regulator for IMU
         ret_val = regulator_enable(imu_vdd_dev);
         if (ret_val < 0) {
@@ -355,7 +361,6 @@ int main(void) {
         /*
          * Power Read Pass 1
          */
-        
         c_status_now = c_status_prev = 0;
 
         if (!device_is_ready(charger)) {
@@ -390,7 +395,7 @@ int main(void) {
          * Power Read Pass 2
          */
         // Wait for next power reading
-        k_sleep(K_MSEC(882));
+        k_msleep(882);
         c_delta = (float)k_uptime_delta(&c_start_ms) / 1000.f;
 
         read_charger(charger, &c_volts, &c_amps, &c_temp, &c_status_now);
@@ -426,8 +431,6 @@ int main(void) {
         // Print payload
         bthome_print(pkt_id, (uint8_t)c_soc, (uint16_t)(c_volts * 1000), vbus_detected, rotation, (int16_t)(c_amps * 1000));
 
-        led_off();
-
         /*
          * Shutdown
          */
@@ -437,6 +440,12 @@ int main(void) {
                 return 0;
         } else {
                 printk("Success: GRTC wakeup prepared. Powering off...\n\n");
+        }
+
+        // Disable LDO1 regulator, turning off the IMU
+        ret_val = regulator_disable(imu_vdd_dev);
+        if (ret_val < 0) {
+                return 0;
         }
 
         // Do we use mfd_npm13xx_hibernate() instead / alongside???
