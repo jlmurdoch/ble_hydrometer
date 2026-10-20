@@ -1,21 +1,29 @@
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/sensor.h>
-#include <zephyr/drivers/regulator.h>
 #include <zephyr/logging/log.h>
+
+// IMU Power Control
+#include <zephyr/drivers/regulator.h>
+
+// IMU Calculations
 #include <math.h>
 
+// Power Off / Wake
 #include <zephyr/drivers/timer/nrf_grtc_timer.h> // z_nrf_grtc_wakeup_prepare()
 #include <zephyr/logging/log_ctrl.h>             // log_panic()
 #include <zephyr/sys/poweroff.h>                 // sys_poweroff()
-#include <zephyr/pm/device.h>
-#include <zephyr/drivers/pwm.h>
 
+// LED
+#include <zephyr/drivers/pwm.h> 
+#include <zephyr/pm/device.h>
+
+// Bluetooth
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/uuid.h> // BT_UUID_16_ENCODE()
 
-#include <zephyr/drivers/retained_mem.h> // GPREGRET
+// General Purpose Retained Register
+#include <zephyr/drivers/retained_mem.h>
 
-#include <zephyr/drivers/gpio.h>
+// nRF1300
 #include <zephyr/drivers/mfd/npm13xx.h>
 #include <zephyr/drivers/sensor/npm13xx_charger.h>
 #include <nrf_fuel_gauge.h>
@@ -25,10 +33,8 @@
 #define NPM13XX_CHG_STATUS_CC_MASK BIT(3)
 #define NPM13XX_CHG_STATUS_CV_MASK BIT(4)
 
-#define PWM_PERIOD_NS 1000000U
-#define STEP_TIME_MS 500
 #define WAIT_TIME_SECS 10
-#define STATE_OF_CHARGE 1
+#define STATE_OF_CHARGE_ENABLE 1
 
 LOG_MODULE_REGISTER(ble_hydrometer, LOG_LEVEL_INF);
 
@@ -44,7 +50,7 @@ static const struct pwm_dt_spec led_b = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led0));
 // Detect if there is VBUS Power
 static volatile bool vbus_detected = 0;
 
-#ifdef STATE_OF_CHARGE
+#ifdef STATE_OF_CHARGE_ENABLE
 
 static struct gpio_callback vbus_cb_data;
 
@@ -95,7 +101,6 @@ static void vbus_isr(const struct device *dev, struct gpio_callback *cb, uint32_
  */
 int vbus_isr_init(void)
 {
-        ;
         struct sensor_value value;
         int ret_val;
 
@@ -163,7 +168,6 @@ static int charger_state_update(int32_t chg_status)
         return nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_STATE_CHANGE,
                                                &state_info);
 }
-
 #endif
 
 /**
@@ -202,9 +206,13 @@ static int wake_increment(uint8_t *idx)
 static int read_imu_rotation(uint16_t *rotation)
 {
         int ret_val;
-        struct sensor_value odr_attr;
         struct sensor_value x, y, z;
-
+        // Set accel/gyro sampling frequency to 12.5 Hz
+        struct sensor_value odr_attr = {
+                .val1 = 12,
+                .val2 = 500000
+        };
+        
         if (!device_is_ready(imu_dev))
         {
                 ret_val = device_init(imu_dev);
@@ -220,10 +228,6 @@ static int read_imu_rotation(uint16_t *rotation)
                 printk("IMU device is not ready.\n");
                 return -1;
         }
-
-        /* set accel/gyro sampling frequency to 12.5 Hz */
-        odr_attr.val1 = 12;
-        odr_attr.val2 = 500000;
 
         ret_val = sensor_attr_set(imu_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
         if (ret_val != 0)
@@ -351,15 +355,15 @@ int bthome_ble_adv(uint8_t pkt_id, uint8_t battery, uint16_t volts, uint8_t powe
                             BT_GAP_ADV_FAST_INT_MIN_1, // 30ms
                             BT_GAP_ADV_FAST_INT_MAX_1, // 60ms
                             NULL),
-            adv_data, ARRAY_SIZE(adv_data),
-            NULL, 0);
+            adv_data, ARRAY_SIZE(adv_data), NULL, 0);
         if (err)
         {
                 printk("Adv start fail: %d\n", err);
                 return -1;
         }
 
-        k_msleep(300); // 5-10 packets
+        // 5-10 packets
+        k_msleep(300);
         bt_disable();
 
         return 0;
@@ -367,11 +371,11 @@ int bthome_ble_adv(uint8_t pkt_id, uint8_t battery, uint16_t volts, uint8_t powe
 
 int main(void)
 {
+        int ret_val;
         uint8_t pkt_id = 0;
         uint16_t rotation = 0;
-        int ret_val;
-        int64_t c_start_ms;
         int32_t c_status_now, c_status_prev;
+        int64_t c_start_ms;
         float c_volts, c_amps, c_temp, c_soc, c_delta;
         c_volts = c_amps = c_soc = 0;
 
@@ -400,7 +404,8 @@ int main(void)
                 printk("Charger device not ready.\n");
                 return 0;
         }
-#ifdef STATE_OF_CHARGE
+        c_start_ms = k_uptime_get();
+#ifdef STATE_OF_CHARGE_ENABLE
         // Get the current VBUS state - not needed
         vbus_isr_init();
 
@@ -420,7 +425,7 @@ int main(void)
         // Notify the nrf_fuel_gauge library of charger state
         charger_state_update(c_status_now);
 #endif
-        c_start_ms = k_uptime_get();
+        
         wake_increment(&pkt_id);
         read_imu_rotation(&rotation);
 
@@ -429,10 +434,11 @@ int main(void)
          */
         // Wait for next power reading
         k_msleep(881);
+
         c_delta = (float)k_uptime_delta(&c_start_ms) / 1000.f;
 
         read_charger(charger, &c_volts, &c_amps, &c_temp, &c_status_now);
-#ifdef STATE_OF_CHARGE
+#ifdef STATE_OF_CHARGE_ENABLE
         ret_val = nrf_fuel_gauge_ext_state_update(
             vbus_detected ? NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_CONNECTED
                           : NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_DISCONNECTED,
@@ -456,9 +462,7 @@ int main(void)
         }
 #endif
         // Uptime when first power reading done
-        printf("Start: %.3fsecs\n", (double)c_start_ms / 1000.0);
-        // Uptime when second power reading done
-        printf("Delta: %.3fsecs\n", (double)c_delta);
+        printf("DEBUG: Start: %.3fsecs + Delta: %.3fsecs\n", (double)c_start_ms / 1000.0, (double)c_delta);
 
         // Emit BLE payload (State of Charge + VBUS is optional)
         bthome_ble_adv(pkt_id, (uint8_t)c_soc, (uint16_t)(c_volts * 1000), vbus_detected, rotation, (int16_t)(c_amps * 1000));
