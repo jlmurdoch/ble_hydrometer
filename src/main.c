@@ -47,6 +47,10 @@ static const struct pwm_dt_spec led_r = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led1));
 static const struct pwm_dt_spec led_g = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 static const struct pwm_dt_spec led_b = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led0));
 
+static const struct device *const gpio2 = DEVICE_DT_GET(DT_NODELABEL(gpio2));
+static const struct device *const flash_dev = DEVICE_DT_GET(DT_NODELABEL(py25q64));
+static const struct device *const flash_bus = DEVICE_DT_GET(DT_BUS(DT_NODELABEL(py25q64)));
+
 // Detect if there is VBUS Power
 static volatile bool vbus_detected = 0;
 
@@ -312,13 +316,13 @@ int bthome_print(uint8_t pkt_id, uint8_t battery, uint16_t volts, uint8_t power,
 {
         printf("DEBUG: PktId[0x00]: %d, ", pkt_id);
         printf("Battery[0x01]: %d%%, ", battery);
-        printf("Volts[0x0C]: %.3f, ", (double)volts / 1000.0);
+        printf("Volts[0x0C]: %.3fV, ", (double)volts / 1000.0);
         printf("Power[0x10]: %d, ", power);
         printf("Rotation[0x3F]: %.1fº, ", (double)rotation / 10.0);
         printf("Current[0x5D]: %.3fA\n", (double)current / 1000.0);
 
-        printf("DEBUG: 4000 %02x01 %02x0C %02x%02x\n", pkt_id, battery, (uint8_t)(volts >> 8), (uint8_t)(volts & 0xFF));
-        printf("DEBUG: 10%02x 3F%02x %02x5D %02x%02x\n", power, (uint8_t)(rotation >> 8), (uint8_t)(rotation & 0xFF), (uint8_t)((uint16_t)current >> 8), (uint8_t)current);
+        printf("DEBUG: 4000 %02X01 %02X0C %02X%02X / ", pkt_id, battery, (uint8_t)(volts >> 8), (uint8_t)(volts & 0xFF));
+        printf("10%02X 3F%02X %02X5D %02X%02X\n", power, (uint8_t)(rotation >> 8), (uint8_t)(rotation & 0xFF), (uint8_t)((uint16_t)current >> 8), (uint8_t)current);
 
         return 0;
 }
@@ -369,6 +373,96 @@ int bthome_ble_adv(uint8_t pkt_id, uint8_t battery, uint16_t volts, uint8_t powe
         return 0;
 }
 
+int configure_gpio_verbose(const struct device *port, gpio_pin_t pin, gpio_flags_t flags) {
+        int ret_val = gpio_pin_configure(port, pin, flags);
+
+        switch (ret_val)
+        {
+        case 0:
+                break;
+        case -ENOTSUP:
+                printk("ERROR: Unsupported flags for gpio pin %d\n", pin);
+                break;
+        case -EINVAL:
+                printk("ERROR: Invalid argument for gpio pin %d\n", pin);
+                break;
+        case -EIO:
+                printk("ERROR: I/O error for gpio pin %d\n", pin);
+                break;
+        case -EWOULDBLOCK:
+                printk("ERROR: Blocking would occur for gpio pin %d\n", pin);
+                break;        
+        default:
+                printk("ERROR: Unknown error (%d) for gpio pin %d\n", ret_val, pin);
+                break;
+        }
+
+        return ret_val;
+}
+
+int suspend_flash(void) {
+        int ret_val;
+
+        if (device_is_ready(flash_dev)) {
+		ret_val = pm_device_action_run(flash_dev, PM_DEVICE_ACTION_SUSPEND);
+                if (ret_val < 0) {
+                        printf("ERROR: Unable to suspend flash device\n");
+                }
+        }
+
+        if (device_is_ready(flash_bus)) {
+		ret_val = pm_device_action_run(flash_bus, PM_DEVICE_ACTION_SUSPEND);
+                if (ret_val < 0) {
+                        printf("ERROR: Unable to suspend flash SPI bus\n");
+                }
+        }
+
+        if (!device_is_ready(gpio2)) {
+                printf("ERROR: GPIO2 not ready.\n");
+		return -ENODEV;
+        }
+
+        configure_gpio_verbose(gpio2, 5, GPIO_OUTPUT_HIGH);
+        configure_gpio_verbose(gpio2, 0, GPIO_OUTPUT_HIGH);
+        configure_gpio_verbose(gpio2, 3, GPIO_OUTPUT_HIGH);
+        configure_gpio_verbose(gpio2, 1, GPIO_OUTPUT_LOW);
+        configure_gpio_verbose(gpio2, 2, GPIO_OUTPUT_LOW);
+        configure_gpio_verbose(gpio2, 4, GPIO_INPUT | GPIO_PULL_DOWN);
+
+        return 0;
+}
+
+int set_wakeup(void) {
+        int ret_val;
+        
+        /*
+         * mfd_npm13xx_hibernate() 
+         * - 0.5uA 
+         * - Only works on battery power
+         * - GPREGRET1 is lost
+         */
+        // ret_val = mfd_npm13xx_hibernate(pmic, WAIT_TIME_SECS * MSEC_PER_SEC);
+
+        /*
+         * z_nrf_grtc_wakeup_prepare() 
+         * - 2.5uA 
+         * - Works on all power sources
+         * - GPREGRET1 is retained
+         */ 
+        ret_val = z_nrf_grtc_wakeup_prepare(WAIT_TIME_SECS * USEC_PER_SEC);
+
+        if (ret_val < 0)
+        {
+                printk("Error: Sleep / wakeup prepare failed: %d\n", ret_val);
+                return ret_val;
+        }
+        else
+        {
+                printk("Success: Sleep / wakeup prepared. Powering down...\n\n");
+        }
+        return 0;
+}
+
 int main(void)
 {
         int ret_val;
@@ -397,8 +491,6 @@ int main(void)
         /*
          * Power Read Pass 1
          */
-        c_status_now = c_status_prev = 0;
-
         if (!device_is_ready(charger))
         {
                 printk("Charger device not ready.\n");
@@ -413,6 +505,7 @@ int main(void)
             NRF_FUEL_GAUGE_DEFAULT_INIT_PARAMETERS_SECONDARY(0.0f, 0.0f, 0.0f, &battery_model);
         // Pull the initial charger values and status
         read_charger(charger, &params.v0, &params.i0, &params.t0, &c_status_now);
+        c_status_prev = c_status_now;
 
         /*
          * Invert the amps to translate:
@@ -424,19 +517,22 @@ int main(void)
         nrf_fuel_gauge_init(&params, NULL);
         // Notify the nrf_fuel_gauge library of charger state
         charger_state_update(c_status_now);
+        k_msleep(873);
 #endif
         
-        wake_increment(&pkt_id);
         read_imu_rotation(&rotation);
+        // Disable LDO1 regulator, turning off the IMU
+        ret_val = regulator_disable(imu_vdd_dev);
+        if (ret_val < 0)
+        {
+                printk("Error: IMU power-down failed: %d\n", ret_val);
+                return 0;
+        }
 
         /*
          * Power Read Pass 2
          */
-        // Wait for next power reading
-        k_msleep(881);
-
         c_delta = (float)k_uptime_delta(&c_start_ms) / 1000.f;
-
         read_charger(charger, &c_volts, &c_amps, &c_temp, &c_status_now);
 #ifdef STATE_OF_CHARGE_ENABLE
         ret_val = nrf_fuel_gauge_ext_state_update(
@@ -460,37 +556,20 @@ int main(void)
         {
                 return 0;
         }
-#endif
-        // Uptime when first power reading done
+        // Report the start time and delta used in power calibration
         printf("DEBUG: Start: %.3fsecs + Delta: %.3fsecs\n", (double)c_start_ms / 1000.0, (double)c_delta);
-
+#endif
+        // Increment wake counter
+        wake_increment(&pkt_id);
+        
         // Emit BLE payload (State of Charge + VBUS is optional)
         bthome_ble_adv(pkt_id, (uint8_t)c_soc, (uint16_t)(c_volts * 1000), vbus_detected, rotation, (int16_t)(c_amps * 1000));
         // Print payload
         bthome_print(pkt_id, (uint8_t)c_soc, (uint16_t)(c_volts * 1000), vbus_detected, rotation, (int16_t)(c_amps * 1000));
 
-        /*
-         * Shutdown
-         */
-        ret_val = z_nrf_grtc_wakeup_prepare(WAIT_TIME_SECS * USEC_PER_SEC);
-        if (ret_val < 0)
-        {
-                printk("Error: GRTC wakeup prepare failed: %d\n", ret_val);
-                return 0;
-        }
-        else
-        {
-                printk("Success: GRTC wakeup prepared. Powering off...\n\n");
-        }
-
-        // Disable LDO1 regulator, turning off the IMU
-        ret_val = regulator_disable(imu_vdd_dev);
-        if (ret_val < 0)
-        {
-                return 0;
-        }
-
-        // Do we use mfd_npm13xx_hibernate() instead / alongside???
+        suspend_flash();
+        set_wakeup();
+        
         log_panic();
         sys_poweroff();
 

@@ -15,7 +15,11 @@ Features:
   - Basic battery state: Voltage
   - Optional: nPM1300 Fuel Gauge: Current Discharge + Battery Remaining
 
-TODO: 
-- More power tuning
+### Power 
+| Power Type | Current | Conditions            |
+|------------|---------|-----------------------|
+| Hibernate  | ~0.4uA  | No GPREGRET           |
+| Deep Sleep | ~2.3uA  | GRREGRET stored, GRTC |
+| Wake       | ~1600uA | Active                |
 
 Warning: Do NOT use this example with a non-rechargable battery
